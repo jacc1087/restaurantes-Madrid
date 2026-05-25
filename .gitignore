@@ -1,0 +1,35 @@
+# Entorno virtual
+venv/
+.venv/
+env/
+
+# Variables de entorno
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Chromadb local (en producción usa el disco de Render)
+chromadb/
+
+# Carpeta de reseñas originales (pesada, no necesaria en producción)
+Resenas_TA/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# IDEs
+.vscode/
+.idea/
+copias/
+venv/
+__pycache__/
+chromadb/
+Resenas_TA/

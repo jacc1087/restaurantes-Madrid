@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: restaurantes-madrid-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false          # Lo introduces manualmente en el dashboard de Render
+    disk:
+      name: chromadb-storage
+      mountPath: /data/chromadb
+      sizeGB: 1
