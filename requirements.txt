@@ -5,12 +5,7 @@ langchain
 langchain-google-genai
 chromadb
 langgraph
-pysentimiento
-spacy
-scikit-learn
-transformers
-sentence-transformers
-faiss-cpu
-torch
-tqdm
-psutil
+geopy
+fastapi
+uvicorn[standard]
+pydantic
