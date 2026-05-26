@@ -414,7 +414,17 @@ Responde en espanol de forma cercana y natural."""
 def recomendar(agente, consulta, historial):
     historial.append({"role": "user", "content": consulta})
     respuesta = agente.invoke({"messages": historial})
-    ultimo = respuesta["messages"][-1].content
+    ultimo_content = respuesta["messages"][-1].content
+    
+    # Extraer texto si content es una lista de bloques (nuevo formato Gemini)
+    if isinstance(ultimo_content, list):
+        ultimo = " ".join(
+            bloque.get("text", "") for bloque in ultimo_content
+            if isinstance(bloque, dict) and bloque.get("type") == "text"
+        )
+    else:
+        ultimo = ultimo_content
+    
     historial.append({"role": "assistant", "content": ultimo})
     return ultimo
 
