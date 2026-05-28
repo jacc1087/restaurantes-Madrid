@@ -40,7 +40,7 @@ from langgraph.prebuilt import create_react_agent
 
 # ── CONFIGURACION ─────────────────────────────────────────────────────────────
 
-CARPETA_RESENAS  = "Resenas_TA"
+CARPETA_RESENAS  = "Resenas"
 ARCHIVO_RANKING  = "ranking.csv"
 ARCHIVO_RESENAS  = "resenas_unificadas.csv"
 ARCHIVO_ANALISIS = "analisis_restaurantes.csv"
@@ -79,21 +79,27 @@ def limpiar_resena(texto):
 
 def unificar_resenas():
     console.print("[bold cyan]Cargando reseñas...[/bold cyan]")
-    archivos = sorted(glob.glob(f"{CARPETA_RESENAS}/*.csv"))
+    archivos = glob.glob(f"{CARPETA_RESENAS}/*.csv")
     if not archivos:
         raise FileNotFoundError(f"No se encontraron CSVs en: {CARPETA_RESENAS}")
     dfs = []
-    for i, archivo in enumerate(archivos, start=1):
+    for archivo in archivos:
+        nombre = os.path.splitext(os.path.basename(archivo))[0]  # ej: "7" de "7.csv"
+        try:
+            id_restaurante = int(nombre)
+        except ValueError:
+            print(f"  Ignorando archivo con nombre no numérico: {archivo}")
+            continue
         df_temp = pd.read_csv(archivo)
         df_temp = df_temp[['web_scraper_order', 'data3']]
         df_temp = df_temp.rename(columns={'web_scraper_order': 'Id_review', 'data3': 'Review'})
-        df_temp['Id_Restaurante'] = i
+        df_temp['Id_Restaurante'] = id_restaurante
         df_temp['Id_review'] = range(1, len(df_temp) + 1)
         dfs.append(df_temp)
     df = pd.concat(dfs, ignore_index=True)
     df = df[['Id_Restaurante', 'Id_review', 'Review']]
     df['Review'] = df['Review'].apply(limpiar_resena)
-    console.print(f"  [green]✓[/green] {len(df):,} reseñas de [bold]{len(archivos)}[/bold] restaurantes")
+    console.print(f"  [green]✓[/green] {len(df):,} reseñas de [bold]{len(dfs)}[/bold] restaurantes")
     return df
 
 # ── PASO 2: ANALIZAR CON GEMINI ───────────────────────────────────────────────
