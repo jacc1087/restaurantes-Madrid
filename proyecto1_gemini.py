@@ -23,6 +23,12 @@ import ast
 
 import pandas as pd
 from dotenv import load_dotenv
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.text import Text
+from rich import print as rprint
 import google.generativeai as genai
 import chromadb
 from chromadb.utils import embedding_functions
@@ -35,7 +41,7 @@ from langgraph.prebuilt import create_react_agent
 # ── CONFIGURACION ─────────────────────────────────────────────────────────────
 
 CARPETA_RESENAS  = "Resenas_TA"
-ARCHIVO_RANKING  = "ta_calles.csv"
+ARCHIVO_RANKING  = "ranking.csv"
 ARCHIVO_RESENAS  = "resenas_unificadas.csv"
 ARCHIVO_ANALISIS = "analisis_restaurantes.csv"
 CARPETA_CHROMA   = "chromadb"
@@ -48,11 +54,15 @@ CRITERIOS_BOOLEANOS = [
     "buena_comida", "buen_servicio", "buen_ambiente",
     "buena_relacion_precio_calidad", "espera_corta",
     "apto_ninos", "apto_mascotas", "cocina_tradicional",
-    "cocina_moderna", "comida_sencilla", "comida_elaborada"
+    "cocina_moderna", "comida_elaborada",
+    "acceso_minusvalidos", "terraza_exterior",
+    "local_sin_olores", "recomendable_en_pareja", "buenas_vistas"
 ]
 
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+console = Console()
 model_gemini = genai.GenerativeModel(MODELO_GEMINI)
 
 # ── PASO 1: UNIFICAR Y LIMPIAR RESENAS ────────────────────────────────────────
@@ -68,7 +78,7 @@ def limpiar_resena(texto):
     return texto
 
 def unificar_resenas():
-    print("Cargando resenas...")
+    console.print("[bold cyan]Cargando reseñas...[/bold cyan]")
     archivos = sorted(glob.glob(f"{CARPETA_RESENAS}/*.csv"))
     if not archivos:
         raise FileNotFoundError(f"No se encontraron CSVs en: {CARPETA_RESENAS}")
@@ -83,12 +93,12 @@ def unificar_resenas():
     df = pd.concat(dfs, ignore_index=True)
     df = df[['Id_Restaurante', 'Id_review', 'Review']]
     df['Review'] = df['Review'].apply(limpiar_resena)
-    print(f"  {len(df):,} resenas de {len(archivos)} restaurantes")
+    console.print(f"  [green]✓[/green] {len(df):,} reseñas de [bold]{len(archivos)}[/bold] restaurantes")
     return df
 
 # ── PASO 2: ANALIZAR CON GEMINI ───────────────────────────────────────────────
 
-def analizar_restaurante(id_restaurante, resenas):
+def analizar_restaurante(id_restaurante, resenas, nombre=''):
     texto = " | ".join(resenas)
     texto = " ".join(texto.split()[:MAX_PALABRAS])
     prompt = f"""Analiza estas resenas y responde SOLO con JSON, sin texto extra:
@@ -102,15 +112,28 @@ def analizar_restaurante(id_restaurante, resenas):
   "apto_mascotas": bool,
   "cocina_tradicional": bool,
   "cocina_moderna": bool,
-  "comida_sencilla": bool,
   "comida_elaborada": bool,
+  "acceso_minusvalidos": bool,
+  "terraza_exterior": bool,
+  "local_sin_olores": bool,
+  "recomendable_en_pareja": bool,
+  "buenas_vistas": bool,
   "platos_destacados": [],
   "aspectos_positivos": [],
   "aspectos_negativos": [],
+  "rango_precio": "",
+  "dato_curioso": "",
   "resumen": ""
 }}
 Para "aspectos_positivos" incluye una lista de 3 a 5 puntos fuertes mencionados frecuentemente por los clientes (ej. "servicio muy amable", "raciones generosas").
 Para "aspectos_negativos" incluye una lista de 1 a 3 puntos debiles o quejas recurrentes (ej. "tiempo de espera largo", "precio elevado"). Si no hay quejas claras, devuelve lista vacia.
+Para "rango_precio" infiere el nivel de precios a partir de las resenas usando uno de estos valores: "euro", "euro euro", "euro euro euro" o "euro euro euro euro". Si no hay informacion suficiente, usa "euro euro".
+Para "dato_curioso" escribe una sola frase llamativa y memorable que haga unico a este restaurante (ej. "El unico restaurante de Madrid con horno de lena del siglo XIX"). Si no hay nada destacable, deja la cadena vacia.
+Para "acceso_minusvalidos" indica true si las resenas mencionan accesibilidad, rampa, sin escalones o silla de ruedas.
+Para "terraza_exterior" indica true si se menciona terraza, exterior o mesas en la calle.
+Para "local_sin_olores" indica true si el local esta bien ventilado, sin humo o sin olores fuertes.
+Para "recomendable_en_pareja" indica true si se menciona como romantico, ideal para citas o para parejas.
+Para "buenas_vistas" indica true si se menciona vistas, panoramica o terraza con vistas.
 Resenas: {texto}"""
     for intento in range(3):
         try:
@@ -118,17 +141,18 @@ Resenas: {texto}"""
             texto_r = re.sub(r'```json|```', '', response.text).strip()
             resultado = json.loads(texto_r)
             resultado['Id_Restaurante'] = str(id_restaurante)
+            resultado['Nombre'] = nombre
             return resultado
         except Exception as e:
             if '429' in str(e):
                 espera = 10 * (intento + 1)
-                print(f"  Cuota alcanzada, esperando {espera}s...")
+                console.print(f"  [bold red]Cuota alcanzada,[/bold red] esperando {espera}s...")
                 time.sleep(espera)
             elif '504' in str(e):
                 time.sleep(5)
             else:
-                return {'Id_Restaurante': str(id_restaurante), 'error': str(e)}
-    return {'Id_Restaurante': str(id_restaurante), 'error': 'max reintentos'}
+                return {'Id_Restaurante': str(id_restaurante), 'Nombre': nombre, 'error': str(e)}
+    return {'Id_Restaurante': str(id_restaurante), 'Nombre': nombre, 'error': 'max reintentos'}
 
 def analizar_todos(df_completo):
     if os.path.exists(ARCHIVO_ANALISIS):
@@ -136,17 +160,18 @@ def analizar_todos(df_completo):
         df_ok = df_prev[df_prev['error'].isna()] if 'error' in df_prev.columns else df_prev
         ids_ok = set(df_ok['Id_Restaurante'].astype(str).tolist())
         resultados = df_ok.to_dict('records')
-        print(f"Retomando: {len(ids_ok)} ya procesados")
+        console.print(f"[yellow]Retomando:[/yellow] {len(ids_ok)} ya procesados")
     else:
         ids_ok = set()
         resultados = []
 
     pendientes = [r for r in df_completo['Id_Restaurante'].unique() if str(r) not in ids_ok]
-    print(f"Pendientes: {len(pendientes)}")
+    console.print(f"[bold]Pendientes:[/bold] {len(pendientes)}")
     for i, id_rest in enumerate(pendientes, 1):
         resenas = df_completo[df_completo['Id_Restaurante'] == id_rest]['Review'].dropna().tolist()
-        print(f"  [{i}/{len(pendientes)}] Restaurante {id_rest}...")
-        resultados.append(analizar_restaurante(id_rest, resenas))
+        nombre = df_completo[df_completo['Id_Restaurante'] == id_rest]['Restaurante'].iloc[0] if 'Restaurante' in df_completo.columns else ''
+        console.print(f"  [[dim]{i}/{len(pendientes)}[/dim]] Analizando [cyan]{nombre or id_rest}[/cyan]...")
+        resultados.append(analizar_restaurante(id_rest, resenas, nombre=str(nombre)))
         pd.DataFrame(resultados).to_csv(ARCHIVO_ANALISIS, index=False)
         time.sleep(SLEEP_LLAMADAS)
     return pd.DataFrame(resultados)
@@ -154,22 +179,44 @@ def analizar_todos(df_completo):
 # ── PASO 3: CONSTRUIR CHROMADB ────────────────────────────────────────────────
 
 def construir_chromadb(df):
-    print("Construyendo ChromaDB...")
+    console.print("[bold cyan]Construyendo ChromaDB...[/bold cyan]")
     cliente = chromadb.PersistentClient(path=CARPETA_CHROMA)
     try:
         cliente.delete_collection("restaurantes")
     except Exception:
         pass
     ef = embedding_functions.DefaultEmbeddingFunction()
+
     coleccion = cliente.create_collection("restaurantes", embedding_function=ef)
     documentos, metadatos, ids = [], [], []
+    for col in CRITERIOS_BOOLEANOS:
+        if col not in df.columns:
+            df[col] = False
+    if 'rango_precio' not in df.columns:
+        df['rango_precio'] = '€€'
+    if 'dato_curioso' not in df.columns:
+        df['dato_curioso'] = ''
     for _, fila in df.iterrows():
         platos = ", ".join(fila['platos_destacados']) if isinstance(fila['platos_destacados'], list) else ""
         pos = ", ".join(fila['aspectos_positivos']) if isinstance(fila.get('aspectos_positivos'), list) else ""
         neg = ", ".join(fila['aspectos_negativos']) if isinstance(fila.get('aspectos_negativos'), list) else ""
-        texto = f"{fila['resumen']} Platos destacados: {platos} Positivos: {pos} Negativos: {neg}"
+        criterios_activos = " ".join(
+            k.replace("_", " ") for k in CRITERIOS_BOOLEANOS if fila.get(k) == True
+        )
+        dato = str(fila.get('dato_curioso', '') or '')
+        precio = str(fila.get('rango_precio', '') or '')
+        texto = (
+            f"{fila['resumen']} "
+            f"Platos destacados: {platos} "
+            f"Positivos: {pos} Negativos: {neg} "
+            f"Caracteristicas: {criterios_activos} "
+            f"Precio: {precio} "
+            f"Dato curioso: {dato}"
+        )
         meta = {k: (bool(fila[k]) if k in CRITERIOS_BOOLEANOS else str(fila[k])) for k in
                 ['Id_Restaurante', 'Restaurante', 'Dirección', 'platos_destacados'] + CRITERIOS_BOOLEANOS}
+        meta['rango_precio'] = str(fila.get('rango_precio', '') or '')
+        meta['dato_curioso'] = str(fila.get('dato_curioso', '') or '')
         meta['Valoracion'] = float(fila['Valoracion'])
         meta['Votaciones'] = int(fila['Votaciones'])
         meta['Dirección'] = str(fila['Dirección'])
@@ -177,7 +224,7 @@ def construir_chromadb(df):
         metadatos.append(meta)
         ids.append(str(fila['Id_Restaurante']))
     coleccion.add(documents=documentos, metadatas=metadatos, ids=ids)
-    print(f"  {coleccion.count()} restaurantes indexados")
+    console.print(f"  [green]✓[/green] [bold]{coleccion.count()}[/bold] restaurantes indexados")
     return coleccion
 
 # ── PASO 3.5: GEOCODIFICAR RESTAURANTES ──────────────────────────────────────
@@ -189,10 +236,10 @@ def geocodificar_restaurantes(df):
         df_geo['Id_Restaurante'] = df_geo['Id_Restaurante'].astype(str)
         df = df.merge(df_geo, on='Id_Restaurante', how='left')
         if df['latitud'].notna().sum() > 0:
-            print(f"Coordenadas cargadas desde {ARCHIVO_GEO}.")
+            console.print(f"[green]✓[/green] Coordenadas cargadas desde [dim]{ARCHIVO_GEO}[/dim]")
             return df
 
-    print("Geocodificando direcciones (puede tardar ~90 segundos)...")
+    console.print("[bold cyan]Geocodificando direcciones[/bold cyan] (puede tardar ~90 segundos)...")
     geolocator = Nominatim(user_agent="restaurantes_madrid")
     latitudes, longitudes = [], []
     for i, (_, fila) in enumerate(df.iterrows(), 1):
@@ -208,13 +255,13 @@ def geocodificar_restaurantes(df):
         except Exception:
             latitudes.append(None)
             longitudes.append(None)
-        print(f"  [{i}/{len(df)}] geocodificando...")
+        console.print(f"  [[dim]{i}/{len(df)}[/dim]] geocodificando...", end="\r")
         time.sleep(1)  # Nominatim exige 1s entre llamadas
     df['latitud'] = latitudes
     df['longitud'] = longitudes
     # Guardar solo coordenadas en archivo separado para no corromper analisis
     df[['Id_Restaurante', 'latitud', 'longitud']].to_csv(ARCHIVO_GEO, index=False)
-    print(f"Geocodificacion completada: {sum(l is not None for l in latitudes)}/{len(df)} exitosas.")
+    console.print(f"[green]✓[/green] Geocodificación: [bold]{sum(l is not None for l in latitudes)}/{len(df)}[/bold] exitosas")
     return df
 
 # ── TOOLS Y AGENTE ────────────────────────────────────────────────────────────
@@ -261,13 +308,19 @@ def buscar_y_razonar(consulta: str) -> str:
     df_candidatos = df_global[df_global['Id_Restaurante'].astype(str).isin(ids_semanticos)].copy()
 
     # 3. Aplicar filtros booleanos si la consulta los menciona explicitamente
+    c = consulta.lower()
     filtros_detectados = {
-        'apto_ninos'                  : any(w in consulta.lower() for w in ['nino', 'niño', 'familia', 'hijo', 'peque']),
-        'apto_mascotas'               : any(w in consulta.lower() for w in ['perro', 'mascota', 'animal']),
-        'buena_relacion_precio_calidad': any(w in consulta.lower() for w in ['precio', 'economico', 'barato', 'calidad precio']),
-        'espera_corta'                : any(w in consulta.lower() for w in ['rapido', 'sin espera', 'espera corta']),
-        'cocina_tradicional'          : any(w in consulta.lower() for w in ['tradicional', 'clasico', 'tipico']),
-        'cocina_moderna'              : any(w in consulta.lower() for w in ['moderno', 'innovador', 'fusion', 'creativo']),
+        'apto_ninos'                  : any(w in c for w in ['nino', 'niño', 'familia', 'hijo', 'peque', 'crio', 'infantil', 'bebe', 'bebé', 'pequeño']),
+        'apto_mascotas'               : any(w in c for w in ['perro', 'mascota', 'animal', 'can', 'gato', 'admiten perros']),
+        'buena_relacion_precio_calidad': any(w in c for w in ['precio', 'economico', 'barato', 'calidad precio', 'asequible', 'no muy caro', 'tampoco caro', 'razonable']),
+        'espera_corta'                : any(w in c for w in ['rapido', 'sin espera', 'espera corta', 'no esperar', 'urgente', 'prisa']),
+        'cocina_tradicional'          : any(w in c for w in ['tradicional', 'clasico', 'tipico', 'castizo', 'de toda la vida', 'casero', 'abuela']),
+        'cocina_moderna'              : any(w in c for w in ['moderno', 'innovador', 'fusion', 'creativo', 'vanguardia', 'gastro', 'autor', 'tendencia']),
+        'acceso_minusvalidos'         : any(w in c for w in ['minusvalido', 'discapacidad', 'silla de ruedas', 'accesible', 'rampa', 'movilidad reducida']),
+        'terraza_exterior'            : any(w in c for w in ['terraza', 'exterior', 'calle', 'aire libre', 'fuera', 'sol']),
+        'local_sin_olores'            : any(w in c for w in ['sin olor', 'sin humo', 'ventilado', 'no huele', 'alergia']),
+        'recomendable_en_pareja'      : any(w in c for w in ['pareja', 'romantico', 'romantica', 'cita', 'aniversario', 'intimo', 'dos personas']),
+        'buenas_vistas'               : any(w in c for w in ['vistas', 'panoramica', 'con vistas', 'paisaje', 'mirador']),
     }
 
     for criterio, detectado in filtros_detectados.items():
@@ -294,10 +347,14 @@ def buscar_y_razonar(consulta: str) -> str:
             f"Direccion: {r['Dirección']}\n"
             f"Resumen: {r['resumen']}\n"
             f"Platos destacados: {platos}\n"
+            f"Precio: {r.get('rango_precio', 'N/D')} | "
             f"Apto ninos: {r['apto_ninos']} | Mascotas: {r['apto_mascotas']} | "
             f"Tradicional: {r['cocina_tradicional']} | Moderno: {r['cocina_moderna']}\n"
+            f"Terraza: {r.get('terraza_exterior', False)} | Acceso minusvalidos: {r.get('acceso_minusvalidos', False)} | "
+            f"Buenas vistas: {r.get('buenas_vistas', False)} | Para pareja: {r.get('recomendable_en_pareja', False)}\n"
             f"Aspectos positivos: {chr(10).join('- '+p for p in r['aspectos_positivos']) if isinstance(r.get('aspectos_positivos'), list) else ''}\n"
-            f"Aspectos negativos: {chr(10).join('- '+n for n in r['aspectos_negativos']) if isinstance(r.get('aspectos_negativos'), list) and r['aspectos_negativos'] else 'Ninguno destacable'}"
+            f"Aspectos negativos: {chr(10).join('- '+n for n in r['aspectos_negativos']) if isinstance(r.get('aspectos_negativos'), list) and r['aspectos_negativos'] else 'Ninguno destacable'}\n"
+            f"Dato curioso: {r.get('dato_curioso', '') or ''}"
         )
     return "\n\n---\n\n".join(contexto)
 
@@ -399,13 +456,15 @@ Tienes cinco herramientas:
    Si el usuario no da su ubicacion, preguntasela antes de llamar a la herramienta.
 
 Cuando recomiendes restaurantes SIEMPRE estructura tu respuesta así para cada uno:
-- Nombre y valoración
+- Nombre, valoración y rango de precio (usa el campo rango_precio del contexto)
 - Por qué encaja con lo que pide el usuario
 - ✅ Aspectos positivos destacados por los clientes (usa los aspectos_positivos del contexto)
 - ⚠️ Aspectos a tener en cuenta (usa los aspectos_negativos del contexto; si no hay, dilo)
 - Platos recomendados
+- 💡 Dato curioso (solo si el campo dato_curioso del contexto no está vacío)
 
 Es OBLIGATORIO mencionar los aspectos negativos cuando existan. No los omitas aunque sean menores.
+Incluye el dato curioso siempre que exista, es lo que hace memorable la recomendacion.
 Si el contexto no incluye restaurantes del tipo pedido, dilo honestamente.
 
 Responde en espanol de forma cercana y natural."""
@@ -467,6 +526,8 @@ if __name__ == "__main__":
     df['platos_destacados'] = df['platos_destacados'].apply(parsear_platos)
     df['aspectos_positivos'] = df['aspectos_positivos'].apply(parsear_platos) if 'aspectos_positivos' in df.columns else df.get('aspectos_positivos', [[]]*len(df))
     df['aspectos_negativos'] = df['aspectos_negativos'].apply(parsear_platos) if 'aspectos_negativos' in df.columns else df.get('aspectos_negativos', [[]]*len(df))
+    df['rango_precio'] = df['rango_precio'].fillna('€€') if 'rango_precio' in df.columns else '€€'
+    df['dato_curioso'] = df['dato_curioso'].fillna('') if 'dato_curioso' in df.columns else ''
     df['Id_Restaurante'] = df['Id_Restaurante'].astype(str)
 
     # Geocodificar direcciones (solo la primera vez, luego usa cache del CSV)
@@ -475,17 +536,30 @@ if __name__ == "__main__":
     coleccion = construir_chromadb(df)
     agente = construir_agente(df, coleccion)
 
-    print("\n" + "="*60)
-    print("  Proyecto 1 - Gemini + ChromaDB + LangGraph")
-    print("  Escribe 'salir' para terminar")
-    print("="*60)
+    console.print(Panel.fit(
+        "[bold yellow]Proyecto 1[/bold yellow] · Gemini + ChromaDB + LangGraph\n"
+        "[dim]Escribe [bold]salir[/bold] para terminar[/dim]",
+        border_style="yellow",
+        padding=(1, 4),
+    ))
 
     historial = []
     while True:
-        pregunta = input("\nTu: ").strip()
+        try:
+            pregunta = console.input("\n[bold green]Tú →[/bold green] ").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[dim]Hasta luego![/dim]")
+            break
         if pregunta.lower() in ['salir', 'exit', 'quit']:
-            print("Hasta luego!")
+            console.print("[dim]Hasta luego![/dim]")
             break
         if not pregunta:
             continue
-        print(f"\nAsistente: {recomendar(agente, pregunta, historial)}")
+        with console.status("[bold cyan]Pensando...[/bold cyan]", spinner="dots"):
+            respuesta = recomendar(agente, pregunta, historial)
+        console.print(Panel(
+            Markdown(respuesta),
+            title="[bold cyan]Asistente[/bold cyan]",
+            border_style="cyan",
+            padding=(1, 2),
+        ))
