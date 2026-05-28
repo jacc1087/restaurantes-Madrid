@@ -100,6 +100,7 @@ def unificar_resenas():
     df = df[['Id_Restaurante', 'Id_review', 'Review']]
     df['Review'] = df['Review'].apply(limpiar_resena)
     console.print(f"  [green]✓[/green] {len(df):,} reseñas de [bold]{len(dfs)}[/bold] restaurantes")
+    df = df.sort_values(['Id_Restaurante', 'Id_review']).reset_index(drop=True)
     return df
 
 # ── PASO 2: ANALIZAR CON GEMINI ───────────────────────────────────────────────
