@@ -24,7 +24,6 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS para permitir peticiones desde la PWA
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -36,7 +35,7 @@ app.add_middleware(
 # ── MODELOS ────────────────────────────────────────────────────────────────────
 
 class MensajeHistorial(BaseModel):
-    role: str        # "user" o "assistant"
+    role: str
     content: str
 
 class ConsultaRequest(BaseModel):
@@ -46,15 +45,17 @@ class ConsultaRequest(BaseModel):
 class RecomendacionResponse(BaseModel):
     respuesta: str
     proyecto: str
+    restaurantes: Optional[List[dict]] = []
 
 # ── ESTADO GLOBAL ──────────────────────────────────────────────────────────────
 
 agente_global = None
+df_global = None
 
-# ── INICIALIZAR PROYECTO 1 ─────────────────────────────────────────────────────
+# ── INICIALIZAR ────────────────────────────────────────────────────────────────
 
 def inicializar():
-    global agente_global
+    global agente_global, df_global
     import proyecto1_gemini as p1
 
     def parsear_lista(v):
@@ -63,7 +64,6 @@ def inicializar():
         except: return []
 
     print("Cargando datos...")
-    # BASE_DIR asegura que las rutas funcionan tanto en local como en Render
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
     df_analisis = pd.read_csv(os.path.join(BASE_DIR, p1.ARCHIVO_ANALISIS))
@@ -80,7 +80,6 @@ def inicializar():
     df['Valoracion']         = df['Valoracion'].fillna(0.0)
     df['Dirección']          = df['Dirección'].fillna("")
 
-    # Cargar coordenadas si existen
     geo_path = os.path.join(BASE_DIR, p1.ARCHIVO_GEO)
     if os.path.exists(geo_path):
         df_geo = pd.read_csv(geo_path)[['Id_Restaurante', 'latitud', 'longitud']]
@@ -90,17 +89,17 @@ def inicializar():
         df['latitud']  = None
         df['longitud'] = None
 
+    df_global = df
+
     print("Construyendo ChromaDB...")
     coleccion = p1.construir_chromadb(df)
 
     print("Construyendo agente...")
     agente = p1.construir_agente(df, coleccion)
 
-    # Wrapper que gestiona el historial internamente si no se pasa desde fuera
     agente_global = lambda consulta, historial=[]: p1.recomendar(agente, consulta, historial)
     print("Backend listo!")
 
-# Inicializar al arrancar
 @app.on_event("startup")
 async def startup_event():
     inicializar()
@@ -122,26 +121,43 @@ def recomendar(request: ConsultaRequest):
     if agente_global is None:
         raise HTTPException(status_code=503, detail="El agente no esta inicializado")
     try:
-        # Convertir historial de Pydantic a dicts simples
         historial = [{"role": m.role, "content": m.content} for m in request.historial]
         respuesta = agente_global(request.consulta, historial)
+
+        # Extraer nombres de restaurantes mencionados en la respuesta
+        restaurantes = []
+        if df_global is not None:
+            for _, row in df_global.iterrows():
+                nombre = str(row.get('Restaurante', ''))
+                if nombre and nombre.lower() in respuesta.lower():
+                    lat = row.get('latitud')
+                    lon = row.get('longitud')
+                    if pd.notna(lat) and pd.notna(lon):
+                        restaurantes.append({
+                            "nombre": nombre,
+                            "latitud": float(lat),
+                            "longitud": float(lon),
+                            "valoracion": float(row.get('Valoracion', 0)),
+                            "direccion": str(row.get('Dirección', '')),
+                        })
+
         return RecomendacionResponse(
             respuesta=respuesta,
-            proyecto="Gemini + ChromaDB + RAG"
+            proyecto="Gemini + ChromaDB + RAG",
+            restaurantes=restaurantes,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/restaurantes")
 def listar_restaurantes():
-    """Devuelve la lista de restaurantes disponibles."""
+    """Devuelve todos los restaurantes con coordenadas."""
     try:
-        import proyecto1_gemini as p1
-        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-        df = pd.read_csv(os.path.join(BASE_DIR, p1.ARCHIVO_ANALISIS))
-        df_ranking = pd.read_csv(os.path.join(BASE_DIR, p1.ARCHIVO_RANKING), sep=";", skiprows=1)
-        df_ranking = df_ranking[['Id_Restaurante', 'Restaurante', 'Votaciones', 'Valoracion', 'Dirección']]
-        df = pd.merge(df, df_ranking, on='Id_Restaurante', how='left')
-        return df[['Id_Restaurante', 'Restaurante', 'Valoracion', 'Votaciones', 'Dirección']].to_dict('records')
+        if df_global is None:
+            raise HTTPException(status_code=503, detail="Datos no cargados")
+        cols = ['Id_Restaurante', 'Restaurante', 'Valoracion', 'Votaciones', 'Dirección', 'latitud', 'longitud']
+        df = df_global[[c for c in cols if c in df_global.columns]].copy()
+        df = df[df['latitud'].notna() & df['longitud'].notna()]
+        return df.to_dict('records')
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
